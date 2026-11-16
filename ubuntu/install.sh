@@ -13,7 +13,8 @@ Usage:
 
 Options:
   --help       Display this help message
-  --check      Validate Ubuntu, GNOME and installer configuration
+  --check           Validate Ubuntu, GNOME and installer configuration
+  --packages-check  Check APT package availability without installing
 
 No installation mode is available yet.
 Running this script makes no desktop or system changes.
@@ -30,6 +31,9 @@ for arg in "$@"; do
             ;;
         --check)
             MODE="check"
+            ;;
+        --packages-check)
+            MODE="packages-check"
             ;;
         *)
             echo "ERROR: Unknown option: $arg" >&2
@@ -96,8 +100,55 @@ validate_environment() {
     echo "No system or desktop changes were made."
 }
 
+check_packages() {
+    command -v apt-cache >/dev/null 2>&1 \
+        || fail "apt-cache is unavailable."
+
+    command -v dpkg-query >/dev/null 2>&1 \
+        || fail "dpkg-query is unavailable."
+
+    local unavailable=0
+
+    echo
+    echo "APT PACKAGE PREFLIGHT"
+    echo "---------------------"
+
+    for pkg in "${MACSTYLE_APT_PACKAGES[@]}"; do
+        [[ "$pkg" =~ ^[a-zA-Z0-9.+-]+$ ]] \
+            || fail "Invalid package name: $pkg"
+
+        local installed candidate
+
+        installed="$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)"
+        candidate="$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2; exit}')"
+
+        if [[ "$installed" == "installed" ]]; then
+            printf "INSTALLED   %-30s candidate: %s\\n" "$pkg" "${candidate:-unknown}"
+        elif [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
+            printf "AVAILABLE   %-30s candidate: %s\\n" "$pkg" "$candidate"
+        else
+            printf "UNAVAILABLE %s\\n" "$pkg"
+            unavailable=1
+        fi
+    done
+
+    echo
+    if (( unavailable == 0 )); then
+        echo "APT preflight: PASS"
+    else
+        echo "APT preflight: FAILED — unavailable packages found."
+        return 1
+    fi
+
+    echo "No packages were installed or modified."
+}
+
 case "$MODE" in
     check)
         validate_environment
+        ;;
+    packages-check)
+        validate_environment
+        check_packages
         ;;
 esac
