@@ -13,8 +13,29 @@ init() {
 
 validate() {
     local p="$1"
-    [[ -n "$p" && "$p" != /* && "$p" != *$'\n'* ]] || return 1
-    [[ "/$p/" != *"/../"* && "/$p/" != *"/./"* ]] || return 1
+    local home_real target_real
+
+    [[ -n "$p" && "$p" != /* && "$p" != *$'
+'* ]] || {
+        echo "ERROR: Invalid relative path: $p" >&2
+        return 1
+    }
+
+    [[ "/$p/" != *"/../"* && "/$p/" != *"/./"* ]] || {
+        echo "ERROR: Path traversal rejected: $p" >&2
+        return 1
+    }
+
+    home_real="$(realpath -e -- "$HOME")" || return 1
+    target_real="$(realpath -m -- "$home_real/$p")" || return 1
+
+    case "$target_real" in
+        "$home_real"/*) return 0 ;;
+        *)
+            echo "ERROR: Path escapes home through a symlink: $p" >&2
+            return 1
+            ;;
+    esac
 }
 
 backup_path() {
@@ -64,6 +85,33 @@ backup_dconf() {
     echo "DConf backup created."
 }
 
+
+restore_dconf() {
+    local backup="$STATE/dconf-backup.ini"
+
+    [[ -s "$backup" ]] || {
+        echo "ERROR: No DConf backup found." >&2
+        return 1
+    }
+
+    command -v dconf >/dev/null 2>&1 || {
+        echo "ERROR: dconf is not installed." >&2
+        return 1
+    }
+
+    echo "WARNING: This restores the complete DConf snapshot."
+    echo "Current desktop settings may be overwritten."
+    read -r -p 'Type RESTORE to continue: ' confirmation
+
+    [[ "$confirmation" == "RESTORE" ]] || {
+        echo "DConf restoration cancelled."
+        return 1
+    }
+
+    dconf load / < "$backup"
+    echo "DConf restoration complete."
+}
+
 restore_paths() {
     init
 
@@ -110,9 +158,13 @@ case "${1:-}" in
     restore)
         restore_paths
         ;;
+    restore-dconf)
+        [[ $# -eq 1 ]] || exit 2
+        restore_dconf
+        ;;
     *)
         echo "Usage: backup.sh {backup|track} RELATIVE_PATH"
-        echo "       backup.sh {dconf-backup|restore}"
+        echo "       backup.sh {dconf-backup|restore|restore-dconf}"
         exit 2
         ;;
 esac
