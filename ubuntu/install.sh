@@ -15,6 +15,7 @@ Options:
   --help       Display this help message
   --check           Validate Ubuntu, GNOME and installer configuration
   --packages-check  Check APT package availability without installing
+  --install-packages Install missing configured APT packages
 
 No installation mode is available yet.
 Running this script makes no desktop or system changes.
@@ -34,6 +35,9 @@ for arg in "$@"; do
             ;;
         --packages-check)
             MODE="packages-check"
+            ;;
+        --install-packages)
+            MODE="install-packages"
             ;;
         *)
             echo "ERROR: Unknown option: $arg" >&2
@@ -143,6 +147,78 @@ check_packages() {
     echo "No packages were installed or modified."
 }
 
+
+install_packages() {
+    local missing=()
+    local unavailable=()
+
+    echo
+    echo "APT INSTALLATION PREFLIGHT"
+    echo "-------------------------"
+
+    for pkg in "${MACSTYLE_APT_PACKAGES[@]}"; do
+        [[ "$pkg" =~ ^[a-zA-Z0-9.+-]+$ ]] \
+            || fail "Invalid package name: $pkg"
+
+        local installed candidate
+        installed="$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)"
+        candidate="$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2; exit}')"
+
+        if [[ "$installed" == "installed" ]]; then
+            echo "Already installed: $pkg"
+        elif [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
+            missing+=("$pkg")
+            echo "Will install: $pkg ($candidate)"
+        else
+            unavailable+=("$pkg")
+            echo "Unavailable: $pkg"
+        fi
+    done
+
+    if ((${#unavailable[@]} > 0)); then
+        fail "Unavailable packages found. Nothing will be installed."
+    fi
+
+    if ((${#missing[@]} == 0)); then
+        echo "All configured packages are already installed."
+        return 0
+    fi
+
+    echo
+    echo "Packages to install: ${#missing[@]}"
+    printf '  - %s\n' "${missing[@]}"
+    echo
+    read -r -p "Proceed with APT installation? [y/N] " answer
+
+    case "$answer" in
+        y|Y|yes|YES) ;;
+        *)
+            echo "Installation cancelled. No packages were installed."
+            return 0
+            ;;
+    esac
+
+    command -v sudo >/dev/null 2>&1 || fail "sudo is unavailable."
+    sudo -v
+
+    sudo apt-get install -y --no-install-recommends -- "${missing[@]}"
+
+    local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/macstyle-ubuntu"
+    mkdir -p "$state_dir"
+    touch "$state_dir/packages-requested.list"
+
+    for pkg in "${missing[@]}"; do
+        if ! grep -Fqx -- "$pkg" "$state_dir/packages-requested.list"; then
+            printf '%s\n' "$pkg" >> "$state_dir/packages-requested.list"
+        fi
+    done
+
+    echo
+    echo "APT installation completed."
+    echo "Requested package list: $state_dir/packages-requested.list"
+    echo "Packages are intentionally not removed by the uninstaller."
+}
+
 case "$MODE" in
     check)
         validate_environment
@@ -150,5 +226,9 @@ case "$MODE" in
     packages-check)
         validate_environment
         check_packages
+        ;;
+    install-packages)
+        validate_environment
+        install_packages
         ;;
 esac
