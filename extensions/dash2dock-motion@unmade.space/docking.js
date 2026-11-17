@@ -2885,8 +2885,7 @@ export class DockManager {
         [this._methodInjections, this._vfuncInjections, this._propertyInjections].forEach(
             injections => injections.removeWithLabel(Labels.MAIN_DASH));
 
-        // Local patch (macstyle, 2026-10-12): at logout GNOME may have torn the overview down
-        // already; then there is nothing to restore, and destroy() must still remove the docks.
+        // MacStyle: GNOME may tear down the overview before extension cleanup at logout.
         if (!this.overviewControls.layout_manager)
             return;
         this.overviewControls.layout_manager._dash = this._oldDash;
