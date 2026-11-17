@@ -7,6 +7,19 @@ BACKUP_HELPER="$SCRIPT_DIR/backup.sh"
 DCONF_MODULE="$SCRIPT_DIR/modules/dconf.sh"
 UNIT="macstyle-darkswitch.service"
 
+DOWNLOADS_FAN_UUID="downloads-fan@macstyle.local"
+DOWNLOADS_FAN_FAVORITE="downloads-folder.desktop"
+DOWNLOADS_FAN_STATE="$STATE/downloads-fan/original-state"
+
+DOWNLOADS_FAN_PATHS=(
+    ".local/share/gnome-shell/extensions/downloads-fan@macstyle.local"
+    ".local/libexec/downloads-stack"
+    ".local/share/applications/downloads-folder.desktop"
+)
+
+OWNED_INSTALLED=()
+OWNED_BACKED_UP=()
+
 EXTENSIONS=(
     ".local/share/gnome-shell/extensions/dash2dock-motion@unmade.space"
     ".local/share/gnome-shell/extensions/blur-my-shell@aunetx"
@@ -31,6 +44,24 @@ contains() {
 
 is_extension() {
     contains "$1" "${EXTENSIONS[@]}"
+}
+
+is_owned_installed() {
+    local item="$1"
+    if is_extension "$item"; then return 0; fi
+    if contains "$item" "${DOWNLOADS_FAN_PATHS[@]}"; then return 0; fi
+    case "$item" in
+        ".local/bin/macstyle-darkswitch"|".config/systemd/user/macstyle-darkswitch.service"|".zshrc")
+            return 0 ;;
+    esac
+    return 1
+}
+
+is_owned_backup() {
+    local item="$1"
+    if is_extension "$item"; then return 0; fi
+    if contains "$item" "${DOWNLOADS_FAN_PATHS[@]}"; then return 0; fi
+    [[ "$item" == ".zshrc" ]]
 }
 
 usage() {
@@ -83,30 +114,29 @@ validate_manifest() {
     for relative in "${INSTALLED[@]}"; do
         [[ -n "$relative" ]] || fail "Empty installed-path entry."
 
-        if ! is_extension "$relative" &&
-           [[ "$relative" != ".local/bin/macstyle-darkswitch" ]] &&
-           [[ "$relative" != ".config/systemd/user/macstyle-darkswitch.service" ]] &&
-           [[ "$relative" != ".zshrc" ]]; then
-            fail "Unexpected installed path: $relative"
-        fi
-
         [[ -z "${seen_installed[$relative]+x}" ]] ||
             fail "Duplicate installed path: $relative"
         seen_installed["$relative"]=1
         safe_home_path "$relative"
+
+        if is_owned_installed "$relative"; then
+            OWNED_INSTALLED+=("$relative")
+        else
+            echo "[MacStyle Uninstaller] WARNING: Foreign installed path will be preserved: $relative"
+        fi
     done
 
     for relative in "${BACKED_UP[@]}"; do
         [[ -n "$relative" ]] || fail "Empty backup-path entry."
 
-        if ! is_extension "$relative" && [[ "$relative" != ".zshrc" ]]; then
-            fail "Unexpected backup path: $relative"
-        fi
+        is_owned_backup "$relative" ||
+            fail "Unexpected backup path; refusing unsafe restore: $relative"
 
         [[ -z "${seen_backed[$relative]+x}" ]] ||
             fail "Duplicate backup path: $relative"
         seen_backed["$relative"]=1
         safe_home_path "$relative"
+        OWNED_BACKED_UP+=("$relative")
 
         source="$STATE/original/$relative"
         [[ -e "$source" || -L "$source" ]] ||
@@ -130,6 +160,29 @@ validate_manifest() {
         [[ -f "$STATE/dconf-module-original/$relative" ]] ||
             fail "DConf recovery snapshot missing: $relative"
     done
+
+    if [[ -e "$DOWNLOADS_FAN_STATE" || -L "$DOWNLOADS_FAN_STATE" ]]; then
+        [[ -f "$DOWNLOADS_FAN_STATE" && ! -L "$DOWNLOADS_FAN_STATE" ]] ||
+            fail "Downloads Fan recovery state is not a regular file."
+
+        python3 - "$DOWNLOADS_FAN_STATE" <<'PY_STATE'
+import sys
+from pathlib import Path
+
+values = {}
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if "=" not in line:
+        raise SystemExit("Malformed Downloads Fan recovery state.")
+    key, value = line.split("=", 1)
+    if key in values or value not in ("0", "1"):
+        raise SystemExit("Malformed Downloads Fan recovery state.")
+    values[key] = value
+
+expected = {"extension_enabled_before", "favorite_before"}
+if set(values) != expected:
+    raise SystemExit("Incomplete Downloads Fan recovery state.")
+PY_STATE
+    fi
 
     local zrc="$HOME/.zshrc"
     [[ ! -L "$zrc" ]] || fail ".zshrc is a symlink; refusing to edit."
@@ -196,8 +249,8 @@ restore_files() {
     local i
 
     # Remove paths created/tracked by the installer, except .zshrc.
-    for ((i=${#INSTALLED[@]}-1; i>=0; i--)); do
-        relative="${INSTALLED[$i]}"
+    for ((i=${#OWNED_INSTALLED[@]}-1; i>=0; i--)); do
+        relative="${OWNED_INSTALLED[$i]}"
         [[ "$relative" == ".zshrc" ]] && continue
 
         safe_home_path "$relative"
@@ -210,8 +263,8 @@ restore_files() {
     done
 
     # Replace each previously existing extension directory completely.
-    for ((i=${#BACKED_UP[@]}-1; i>=0; i--)); do
-        relative="${BACKED_UP[$i]}"
+    for ((i=${#OWNED_BACKED_UP[@]}-1; i>=0; i--)); do
+        relative="${OWNED_BACKED_UP[$i]}"
         [[ "$relative" == ".zshrc" ]] && continue
 
         safe_home_path "$relative"
@@ -227,6 +280,62 @@ restore_files() {
     remove_zsh_block
 }
 
+restore_downloads_fan_settings() {
+    [[ -f "$DOWNLOADS_FAN_STATE" ]] || {
+        echo "No Downloads Fan GNOME state snapshot; settings unchanged."
+        return 0
+    }
+
+    python3 - "$DOWNLOADS_FAN_STATE" "$DOWNLOADS_FAN_UUID" "$DOWNLOADS_FAN_FAVORITE" <<'PY_GSETTINGS'
+import ast
+import subprocess
+import sys
+
+state_path, uuid, favorite = sys.argv[1:]
+state = {}
+for line in open(state_path, encoding="utf-8"):
+    key, value = line.rstrip("\n").split("=", 1)
+    state[key] = value
+
+def read_array(key):
+    result = subprocess.run(
+        ["gsettings", "get", "org.gnome.shell", key],
+        check=True, capture_output=True, text=True
+    )
+    value = ast.literal_eval(result.stdout.strip())
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise SystemExit(f"Unexpected GSettings array for {key}")
+    return value
+
+def quote_gvariant(value):
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+def write_array(key, values):
+    serialized = "[" + ", ".join(quote_gvariant(x) for x in values) + "]"
+    subprocess.run(
+        ["gsettings", "set", "org.gnome.shell", key, serialized],
+        check=True
+    )
+
+enabled = read_array("enabled-extensions")
+favorites = read_array("favorite-apps")
+
+if state["extension_enabled_before"] == "1" and uuid not in enabled:
+    enabled.append(uuid)
+elif state["extension_enabled_before"] == "0":
+    enabled = [item for item in enabled if item != uuid]
+
+if state["favorite_before"] == "1" and favorite not in favorites:
+    favorites.append(favorite)
+elif state["favorite_before"] == "0":
+    favorites = [item for item in favorites if item != favorite]
+
+write_array("enabled-extensions", enabled)
+write_array("favorite-apps", favorites)
+print("Restored original Downloads Fan enablement and Dock membership.")
+PY_GSETTINGS
+}
+
 validate_manifest
 
 echo "[MacStyle Uninstaller] Recovery records validated."
@@ -234,7 +343,8 @@ echo "[MacStyle Uninstaller] Recovery records validated."
 if [[ "$MODE" == "--dry-run" ]]; then
     echo
     echo "========== TRACKED PATHS TO REMOVE =========="
-    printf '%s\n' "${INSTALLED[@]}"
+    printf '%s\n' "${OWNED_INSTALLED[@]}"
+    echo "Foreign manifest entries are preserved and will not be removed."
 
     echo
     echo "========== ORIGINAL EXTENSIONS TO RESTORE =========="
@@ -255,8 +365,9 @@ if [[ "$MODE" == "--dry-run" ]]; then
     echo "Magic Lamp"
 
     echo
-    echo "APT packages, wallpaper, selected themes, extension enablement"
-    echo "and unrelated GNOME settings will be preserved."
+    echo "APT packages, wallpaper, selected themes and unrelated GNOME settings"
+    echo "will be preserved. Downloads Fan enablement and favorite membership"
+    echo "will be restored to their recorded original state."
     echo "Recovery backups will be retained."
     echo
     echo "DRY RUN complete. No changes made."
@@ -287,6 +398,11 @@ echo "========== TARGETED DCONF RESTORE =========="
 echo
 echo "========== FILE RESTORE =========="
 restore_files
+
+echo
+echo "========== RESTORE DOWNLOADS FAN GNOME STATE =========="
+restore_downloads_fan_settings ||
+    fail "Could not restore Downloads Fan GNOME state."
 
 systemctl --user daemon-reload ||
     echo "WARNING: systemd daemon reload failed."
