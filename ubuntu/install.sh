@@ -17,8 +17,8 @@ Options:
   --packages-check  Check APT package availability without installing
   --install-packages Install missing configured APT packages
 
-No installation mode is available yet.
-Running this script makes no desktop or system changes.
+--install-packages installs missing configured APT packages after confirmation.
+No desktop settings are changed and no existing packages are removed.
 USAGE
 }
 
