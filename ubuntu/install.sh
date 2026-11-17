@@ -20,8 +20,9 @@ Options:
   --install            Install packages, extensions, DConf and Zsh integration
   --help               Show help
 
-The installer does not remove packages, change wallpaper,
-select themes, or enable/disable GNOME extensions.
+The installer does not remove packages, change wallpaper, or select themes.
+It enables Downloads Fan and adds its Dock launcher while preserving
+unrelated GNOME extensions and existing Dock favorites.
 EOF
 }
 
@@ -66,6 +67,8 @@ validate_environment() {
         fail "Extensions module is missing or not executable."
     [[ -x "$SCRIPT_DIR/modules/dconf.sh" ]] ||
         fail "DConf module is missing or not executable."
+    [[ -x "$SCRIPT_DIR/modules/downloads-fan.sh" ]] ||
+        fail "Downloads Fan module is missing or not executable."
     [[ -r "$SCRIPT_DIR/zsh-integration.zsh" ]] ||
         fail "Zsh integration file is missing."
 
@@ -195,6 +198,7 @@ install_desktop_components() {
     echo "========== MODULE PREFLIGHT =========="
     "$SCRIPT_DIR/modules/extensions.sh" --dry-run
     "$SCRIPT_DIR/modules/dconf.sh" --dry-run
+    "$SCRIPT_DIR/modules/downloads-fan.sh" --dry-run
 
     echo
     echo "========== INSTALL EXTENSIONS =========="
@@ -205,13 +209,19 @@ install_desktop_components() {
     "$SCRIPT_DIR/modules/dconf.sh" --apply
 
     echo
+    echo "========== INSTALL DOWNLOADS FAN =========="
+    "$SCRIPT_DIR/modules/downloads-fan.sh"
+
+    echo
     echo "========== CONFIGURE ZSH =========="
     install_zsh_integration
 
     echo
     echo "MacStyle Ubuntu installation steps completed."
     echo "Log out and log back in if GNOME needs to reload extension files."
-    echo "No wallpaper, theme selection, dock state or extension enablement was changed."
+    echo "Wallpaper and theme selection were not changed."
+    echo "Downloads Fan was enabled and added to Dock favorites if missing."
+    echo "All other Dock favorites and extension enablement states were preserved."
 }
 
 case "$MODE" in
