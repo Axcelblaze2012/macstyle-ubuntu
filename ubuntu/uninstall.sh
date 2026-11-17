@@ -7,14 +7,7 @@ BACKUP_HELPER="$SCRIPT_DIR/backup.sh"
 DCONF_MODULE="$SCRIPT_DIR/modules/dconf.sh"
 UNIT="macstyle-darkswitch.service"
 
-EXPECTED_INSTALLED=(
-    ".local/share/gnome-shell/extensions/dash2dock-motion@unmade.space"
-    ".local/bin/macstyle-darkswitch"
-    ".config/systemd/user/macstyle-darkswitch.service"
-)
-
-EXPECTED_BACKED_UP=(
-    ".zshrc"
+EXTENSIONS=(
     ".local/share/gnome-shell/extensions/dash2dock-motion@unmade.space"
     ".local/share/gnome-shell/extensions/blur-my-shell@aunetx"
     ".local/share/gnome-shell/extensions/compiz-alike-magic-lamp-effect@hermes83.github.com"
@@ -22,8 +15,22 @@ EXPECTED_BACKED_UP=(
 )
 
 fail() {
-    printf '[MacStyle Uninstaller] ERROR: %s\n' "$*" >&2
+    echo "[MacStyle Uninstaller] ERROR: $*" >&2
     exit 1
+}
+
+contains() {
+    local item="$1"
+    shift
+    local entry
+    for entry in "$@"; do
+        [[ "$entry" == "$item" ]] && return 0
+    done
+    return 1
+}
+
+is_extension() {
+    contains "$1" "${EXTENSIONS[@]}"
 }
 
 usage() {
@@ -31,6 +38,7 @@ usage() {
 }
 
 MODE="${1:---help}"
+
 case "$MODE" in
     --help|-h) usage; exit 0 ;;
     --dry-run|--uninstall) ;;
@@ -39,37 +47,26 @@ esac
 
 [[ "$EUID" -ne 0 ]] || fail "Do not run as root."
 command -v realpath >/dev/null 2>&1 || fail "realpath is unavailable."
+command -v python3 >/dev/null 2>&1 || fail "python3 is unavailable."
 [[ -x "$BACKUP_HELPER" ]] || fail "Backup helper missing."
 [[ -x "$DCONF_MODULE" ]] || fail "DConf module missing."
 [[ -f "$STATE/installed.list" ]] || fail "Installed-path record missing."
 [[ -f "$STATE/backed-up.list" ]] || fail "Original-path record missing."
 
-check_manifest() {
-    local file="$1"
-    shift
-    local expected=("$@")
-    local actual=()
-    mapfile -t actual < "$file"
-
-    ((${#actual[@]} == ${#expected[@]})) ||
-        fail "Unexpected number of paths in $(basename "$file")."
-
-    local i
-    for i in "${!expected[@]}"; do
-        [[ "${actual[$i]}" == "${expected[$i]}" ]] ||
-            fail "Unexpected recovery path in $(basename "$file"): ${actual[$i]:-empty}"
-    done
-}
-
 HOME_REAL="$(realpath -e -- "$HOME")"
 STATE_REAL="$(realpath -e -- "$STATE")"
+
+mapfile -t INSTALLED < "$STATE/installed.list"
+mapfile -t BACKED_UP < "$STATE/backed-up.list"
 
 safe_home_path() {
     local relative="$1"
     local resolved
+    [[ -n "$relative" && "$relative" != /* ]] ||
+        fail "Invalid relative path: $relative"
 
-    [[ "$relative" != /* && "$relative" != *".."* ]] ||
-        fail "Unsafe relative path: $relative"
+    [[ "/$relative/" != *"/../"* ]] ||
+        fail "Path traversal rejected: $relative"
 
     resolved="$(realpath -m -- "$HOME/$relative")"
     case "$resolved" in
@@ -78,17 +75,39 @@ safe_home_path() {
     esac
 }
 
-validate_recovery() {
-    check_manifest "$STATE/installed.list" "${EXPECTED_INSTALLED[@]}"
-    check_manifest "$STATE/backed-up.list" "${EXPECTED_BACKED_UP[@]}"
-
+validate_manifest() {
     local relative source resolved
+    local -A seen_installed=()
+    local -A seen_backed=()
 
-    for relative in "${EXPECTED_INSTALLED[@]}" "${EXPECTED_BACKED_UP[@]}"; do
+    for relative in "${INSTALLED[@]}"; do
+        [[ -n "$relative" ]] || fail "Empty installed-path entry."
+
+        if ! is_extension "$relative" &&
+           [[ "$relative" != ".local/bin/macstyle-darkswitch" ]] &&
+           [[ "$relative" != ".config/systemd/user/macstyle-darkswitch.service" ]] &&
+           [[ "$relative" != ".zshrc" ]]; then
+            fail "Unexpected installed path: $relative"
+        fi
+
+        [[ -z "${seen_installed[$relative]+x}" ]] ||
+            fail "Duplicate installed path: $relative"
+        seen_installed["$relative"]=1
         safe_home_path "$relative"
     done
 
-    for relative in "${EXPECTED_BACKED_UP[@]}"; do
+    for relative in "${BACKED_UP[@]}"; do
+        [[ -n "$relative" ]] || fail "Empty backup-path entry."
+
+        if ! is_extension "$relative" && [[ "$relative" != ".zshrc" ]]; then
+            fail "Unexpected backup path: $relative"
+        fi
+
+        [[ -z "${seen_backed[$relative]+x}" ]] ||
+            fail "Duplicate backup path: $relative"
+        seen_backed["$relative"]=1
+        safe_home_path "$relative"
+
         source="$STATE/original/$relative"
         [[ -e "$source" || -L "$source" ]] ||
             fail "Original backup missing: $relative"
@@ -96,8 +115,15 @@ validate_recovery() {
         resolved="$(realpath -e -- "$source")"
         case "$resolved" in
             "$STATE_REAL/original/"*) ;;
-            *) fail "Backup path escapes recovery directory: $relative" ;;
+            *) fail "Backup escapes recovery directory: $relative" ;;
         esac
+    done
+
+    for relative in "${EXTENSIONS[@]}"; do
+        if ! contains "$relative" "${INSTALLED[@]}" &&
+           ! contains "$relative" "${BACKED_UP[@]}"; then
+            fail "No install or backup record for extension: $relative"
+        fi
     done
 
     for relative in blur-my-shell.ini dash2dock-motion.ini user-theme.ini magic-lamp.ini; do
@@ -106,60 +132,76 @@ validate_recovery() {
     done
 
     local zrc="$HOME/.zshrc"
-    [[ ! -L "$zrc" ]] || fail ".zshrc is a symlink; refusing to modify it."
+    [[ ! -L "$zrc" ]] || fail ".zshrc is a symlink; refusing to edit."
 
     if [[ -e "$zrc" ]]; then
-        [[ -f "$zrc" ]] || fail ".zshrc exists but is not a regular file."
+        [[ -f "$zrc" ]] || fail ".zshrc is not a regular file."
+
         local starts ends
         starts="$(grep -Fxc '# >>> MacStyle Ubuntu Zsh Integration >>>' "$zrc" || true)"
         ends="$(grep -Fxc '# <<< MacStyle Ubuntu Zsh Integration <<<' "$zrc" || true)"
-        if [[ "$starts" != "$ends" || ( "$starts" != 0 && "$starts" != 1 ) ]]; then
-            fail "Zsh integration markers are incomplete or duplicated."
-        fi
+
+        [[ "$starts" == "$ends" ]] ||
+            fail "Incomplete Zsh integration markers."
+        [[ "$starts" == 0 || "$starts" == 1 ]] ||
+            fail "Duplicate Zsh integration blocks."
     fi
 }
 
 remove_zsh_block() {
-    local zrc="$HOME/.zshrc"
-    [[ -f "$zrc" ]] || return 0
+    local had_original=0
+    contains ".zshrc" "${BACKED_UP[@]}" && had_original=1
 
-    python3 - "$zrc" <<'PY'
+    python3 - "$HOME/.zshrc" "$had_original" <<'PY'
 from pathlib import Path
 import sys
 
 path = Path(sys.argv[1])
+had_original = sys.argv[2] == "1"
+
+if not path.exists():
+    raise SystemExit(0)
+
 text = path.read_text(encoding="utf-8")
 start = "# >>> MacStyle Ubuntu Zsh Integration >>>"
 end = "# <<< MacStyle Ubuntu Zsh Integration <<<"
 
-if start not in text and end not in text:
-    print("No managed Zsh block found; existing .zshrc preserved.")
-    raise SystemExit(0)
+if start in text or end in text:
+    if text.count(start) != 1 or text.count(end) != 1:
+        raise SystemExit("Invalid Zsh markers; refusing to modify .zshrc.")
 
-if text.count(start) != 1 or text.count(end) != 1:
-    raise SystemExit("Incomplete or duplicated Zsh markers; refusing to edit .zshrc.")
+    begin = text.index(start)
+    finish = text.index(end, begin) + len(end)
 
-begin = text.index(start)
-finish = text.index(end, begin) + len(end)
+    if text[finish:finish + 2] == "\r\n":
+        finish += 2
+    elif text[finish:finish + 1] == "\n":
+        finish += 1
 
-if text[finish:finish + 2] == "\r\n":
-    finish += 2
-elif text[finish:finish + 1] == "\n":
-    finish += 1
+    text = text[:begin] + text[finish:]
+    path.write_text(text, encoding="utf-8")
+    print("Removed only the MacStyle Zsh block.")
+else:
+    print("No MacStyle Zsh block found.")
 
-path.write_text(text[:begin] + text[finish:], encoding="utf-8")
-print("Removed only the MacStyle-managed Zsh block.")
+# Remove the file only when MacStyle created it and it is now empty.
+if not had_original and not text.strip():
+    path.unlink(missing_ok=True)
+    print("Removed the empty Zsh file created by MacStyle.")
 PY
 }
 
 restore_files() {
     local relative source destination
+    local i
 
-    # Remove paths created by MacStyle, in reverse manifest order.
-    for ((i=${#EXPECTED_INSTALLED[@]}-1; i>=0; i--)); do
-        relative="${EXPECTED_INSTALLED[$i]}"
-        destination="$HOME/$relative"
+    # Remove paths created/tracked by the installer, except .zshrc.
+    for ((i=${#INSTALLED[@]}-1; i>=0; i--)); do
+        relative="${INSTALLED[$i]}"
+        [[ "$relative" == ".zshrc" ]] && continue
+
         safe_home_path "$relative"
+        destination="$HOME/$relative"
 
         if [[ -e "$destination" || -L "$destination" ]]; then
             rm -rf -- "$destination"
@@ -167,90 +209,90 @@ restore_files() {
         fi
     done
 
-    # Restore original extension folders, excluding .zshrc.
-    for ((i=${#EXPECTED_BACKED_UP[@]}-1; i>=0; i--)); do
-        relative="${EXPECTED_BACKED_UP[$i]}"
+    # Replace each previously existing extension directory completely.
+    for ((i=${#BACKED_UP[@]}-1; i>=0; i--)); do
+        relative="${BACKED_UP[$i]}"
         [[ "$relative" == ".zshrc" ]] && continue
 
+        safe_home_path "$relative"
         source="$STATE/original/$relative"
         destination="$HOME/$relative"
 
-        safe_home_path "$relative"
+        rm -rf -- "$destination"
         mkdir -p -- "$(dirname "$destination")"
         cp -a -- "$source" "$destination"
-        echo "Restored: $relative"
+        echo "Restored original: $relative"
     done
 
-    # Keep all user edits outside the marked integration block.
     remove_zsh_block
 }
 
-validate_recovery
+validate_manifest
 
-echo "MacStyle Ubuntu recovery records: PASS"
+echo "[MacStyle Uninstaller] Recovery records validated."
 
 if [[ "$MODE" == "--dry-run" ]]; then
     echo
-    echo "========== FILE ACTIONS =========="
-    printf 'Remove: %s\n' "${EXPECTED_INSTALLED[@]}"
-    printf 'Restore original: %s\n' "${EXPECTED_BACKED_UP[@]:1}"
-    echo "Remove only the marked MacStyle block from .zshrc."
+    echo "========== TRACKED PATHS TO REMOVE =========="
+    printf '%s\n' "${INSTALLED[@]}"
 
     echo
-    echo "========== DCONF TARGETS =========="
+    echo "========== ORIGINAL EXTENSIONS TO RESTORE =========="
+    for relative in "${BACKED_UP[@]}"; do
+        [[ "$relative" == ".zshrc" ]] || echo "$relative"
+    done
+
+    echo
+    echo "========== ZSH =========="
+    echo "Remove only the managed MacStyle block."
+    echo "Preserve all other user content."
+
+    echo
+    echo "========== DCONF =========="
     echo "Blur My Shell"
     echo "Dash2Dock Motion"
     echo "User Theme"
     echo "Magic Lamp"
 
     echo
-    echo "========== PRESERVED =========="
-    echo "APT packages"
-    echo "Wallpaper and background selection"
-    echo "GTK theme, icons and cursor selections"
-    echo "GNOME extension enablement state"
-    echo "Ubuntu Dock and unrelated extension settings"
-    echo "User .zshrc content outside the MacStyle block"
-    echo "Original recovery backups"
-
+    echo "APT packages, wallpaper, selected themes, extension enablement"
+    echo "and unrelated GNOME settings will be preserved."
+    echo "Recovery backups will be retained."
     echo
     echo "DRY RUN complete. No changes made."
     exit 0
 fi
 
 echo
-echo "WARNING: This restores the original extension folders and removes"
-echo "the MacStyle dark-switcher files and managed Zsh block."
-echo "APT packages and unrelated desktop settings will remain."
+echo "This restores original extension directories and removes"
+echo "the tracked MacStyle components."
 read -r -p 'Type UNINSTALL to continue: ' answer
+
 [[ "$answer" == "UNINSTALL" ]] || {
     echo "Uninstall cancelled."
     exit 0
 }
 
-if [[ -f "$HOME/.config/systemd/user/$UNIT" ]]; then
+if contains ".config/systemd/user/$UNIT" "${INSTALLED[@]}" &&
+   [[ -f "$HOME/.config/systemd/user/$UNIT" ]]; then
     systemctl --user disable --now "$UNIT" ||
-        fail "Could not stop/disable $UNIT. No files were restored."
+        fail "Could not stop the dark-switcher service."
 fi
 
 echo
 echo "========== TARGETED DCONF RESTORE =========="
-if ! "$DCONF_MODULE" --rollback; then
-    echo "DConf rollback failed. Attempting to restart the switcher." >&2
-    [[ ! -f "$HOME/.config/systemd/user/$UNIT" ]] ||
-        systemctl --user enable --now "$UNIT" || true
-    fail "Stopped before file restoration. Original backups remain."
-fi
+"$DCONF_MODULE" --rollback ||
+    fail "DConf rollback failed. Original file backups remain."
 
 echo
 echo "========== FILE RESTORE =========="
 restore_files
 
 systemctl --user daemon-reload ||
-    echo "WARNING: systemd user daemon-reload did not complete."
+    echo "WARNING: systemd daemon reload failed."
 
 echo
 echo "MacStyle Ubuntu managed components restored."
-echo "Recovery backups retained at: $STATE"
-echo "Log out and log back in to reload GNOME extension files."
+echo "Original recovery backups retained at: $STATE"
 echo "APT packages were not removed."
+echo "Log out and log back in to reload GNOME extensions."
