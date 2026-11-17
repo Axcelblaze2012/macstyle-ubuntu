@@ -319,6 +319,129 @@ else:
 PY
 }
 
+
+INSTALL_IN_PROGRESS=0
+
+rollback_failed_install() {
+    local relative backup destination
+    local rollback_failed=0
+    local paths=("$LAUNCHER_REL" "$HELPER_REL" "$EXT_REL")
+
+    log "Installation failed. Starting targeted rollback."
+
+    rm -rf -- \
+        "${EXT_DEST}.macstyle-staging" \
+        "${EXT_DEST}.macstyle-previous" \
+        "${HELPER_DEST}.macstyle-staging" \
+        "${LAUNCHER_DEST}.macstyle-staging" || rollback_failed=1
+
+    for relative in "${paths[@]}"; do
+        destination="$HOME/$relative"
+        backup="$STATE/original/$relative"
+
+        if ! rm -rf -- "$destination"; then
+            log "WARNING: Could not remove failed installation path: $relative"
+            rollback_failed=1
+            continue
+        fi
+
+        if is_backed_up "$relative"; then
+            if [[ ! -e "$backup" && ! -L "$backup" ]]; then
+                log "WARNING: Original backup missing: $relative"
+                rollback_failed=1
+                continue
+            fi
+
+            if ! mkdir -p -- "$(dirname "$destination")" ||
+               ! cp -a -- "$backup" "$destination"; then
+                log "WARNING: Could not restore original path: $relative"
+                rollback_failed=1
+                continue
+            fi
+
+            log "Restored original: $relative"
+        else
+            log "Removed newly created path: $relative"
+        fi
+    done
+
+    if [[ -f "$STATE_FILE" ]]; then
+        if ! python3 - "$STATE_FILE" "$UUID" "$FAVORITE" <<'PY_GSETTINGS_ROLLBACK'
+import ast
+import subprocess
+import sys
+
+state_path, uuid, favorite = sys.argv[1:]
+state = {}
+
+for line in open(state_path, encoding="utf-8"):
+    key, value = line.rstrip("\n").split("=", 1)
+    state[key] = value
+
+def read_array(key):
+    result = subprocess.run(
+        ["gsettings", "get", "org.gnome.shell", key],
+        check=True, capture_output=True, text=True
+    )
+    value = ast.literal_eval(result.stdout.strip())
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        raise SystemExit(f"Unexpected GSettings array: {key}")
+    return value
+
+def quote(value):
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+def write_array(key, values):
+    serialized = "[" + ", ".join(quote(x) for x in values) + "]"
+    subprocess.run(
+        ["gsettings", "set", "org.gnome.shell", key, serialized],
+        check=True
+    )
+
+enabled = read_array("enabled-extensions")
+favorites = read_array("favorite-apps")
+
+if state["extension_enabled_before"] == "1":
+    if uuid not in enabled:
+        enabled.append(uuid)
+else:
+    enabled = [item for item in enabled if item != uuid]
+
+if state["favorite_before"] == "1":
+    if favorite not in favorites:
+        favorites.append(favorite)
+else:
+    favorites = [item for item in favorites if item != favorite]
+
+write_array("enabled-extensions", enabled)
+write_array("favorite-apps", favorites)
+print("Original Downloads Fan GNOME state restored.")
+PY_GSETTINGS_ROLLBACK
+        then
+            log "WARNING: Could not restore original GNOME settings."
+            rollback_failed=1
+        fi
+    fi
+
+    if (( rollback_failed )); then
+        log "ROLLBACK INCOMPLETE. Original backups retained at: $STATE/original"
+        return 1
+    fi
+
+    log "Targeted rollback completed. Original backups retained."
+}
+
+rollback_on_exit() {
+    local status=$?
+    trap - EXIT
+
+    if (( status != 0 && INSTALL_IN_PROGRESS )); then
+        rollback_failed_install || log "WARNING: Manual recovery may be required."
+    fi
+
+    exit "$status"
+}
+
 main() {
     case "${1:-}" in
         --dry-run) DRY_RUN=1 ;;
@@ -353,6 +476,10 @@ main() {
         backup_existing "$LAUNCHER_REL"
     fi
 
+    # All original files are now safely backed up.
+    # Only failures after this point trigger targeted rollback.
+    INSTALL_IN_PROGRESS=1
+
     install_extension
     install_helper
     install_launcher
@@ -362,7 +489,10 @@ main() {
         fail "Could not enable Downloads Fan. Recovery state and backups were retained."
 
     log "Downloads Fan enabled."
+    INSTALL_IN_PROGRESS=0
     log "Installation complete."
 }
+
+trap rollback_on_exit EXIT
 
 main "$@"
