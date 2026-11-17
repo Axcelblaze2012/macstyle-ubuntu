@@ -171,8 +171,11 @@ install_zsh_integration() {
     if [[ -e "$rc" ]]; then
         "$BACKUP_HELPER" backup .zshrc
     else
-        "$BACKUP_HELPER" track .zshrc
         : > "$rc"
+        if ! "$BACKUP_HELPER" track .zshrc; then
+            rm -f -- "$rc"
+            fail "Could not track newly created .zshrc"
+        fi
     fi
 
     cat >> "$rc" <<EOF
