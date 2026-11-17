@@ -3,47 +3,36 @@ set -Eeuo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+BACKUP_HELPER="$SCRIPT_DIR/backup.sh"
+MODE="check"
 
 usage() {
-    cat <<'USAGE'
-MacStyle Ubuntu Installer
+    cat <<'EOF'
+MacStyle Ubuntu Installer — Ubuntu 26.04 / GNOME 50
 
 Usage:
   ./ubuntu/install.sh [OPTION]
 
 Options:
-  --help       Display this help message
-  --check           Validate Ubuntu, GNOME and installer configuration
-  --packages-check  Check APT package availability without installing
-  --install-packages Install missing configured APT packages
+  --check              Validate environment
+  --packages-check     Check APT packages without installing
+  --install-packages   Install missing APT packages only
+  --install            Install packages, extensions, DConf and Zsh integration
+  --help               Show help
 
---install-packages installs missing configured APT packages after confirmation.
-No desktop settings are changed and no existing packages are removed.
-USAGE
+The installer does not remove packages, change wallpaper,
+select themes, or enable/disable GNOME extensions.
+EOF
 }
-
-MODE="check"
 
 for arg in "$@"; do
     case "$arg" in
-        --help|-h)
-            usage
-            exit 0
-            ;;
-        --check)
-            MODE="check"
-            ;;
-        --packages-check)
-            MODE="packages-check"
-            ;;
-        --install-packages)
-            MODE="install-packages"
-            ;;
-        *)
-            echo "ERROR: Unknown option: $arg" >&2
-            usage
-            exit 2
-            ;;
+        --help|-h) usage; exit 0 ;;
+        --check) MODE="check" ;;
+        --packages-check) MODE="packages-check" ;;
+        --install-packages) MODE="install-packages" ;;
+        --install) MODE="install" ;;
+        *) echo "ERROR: Unknown option: $arg" >&2; usage >&2; exit 2 ;;
     esac
 done
 
@@ -56,151 +45,101 @@ fail() {
 
 validate_environment() {
     [[ "$EUID" -ne 0 ]] || fail "Do not run as root."
-
-    [[ "$MACSTYLE_PLATFORM" == "ubuntu" ]] \
-        || fail "Invalid platform configuration."
-
-    [[ -f /etc/os-release ]] \
-        || fail "Cannot identify operating system."
-
+    [[ -f /etc/os-release ]] || fail "Cannot identify operating system."
     source /etc/os-release
 
-    [[ "${ID:-}" == "ubuntu" ]] \
-        || fail "Ubuntu is required."
+    [[ "${ID:-}" == ubuntu ]] || fail "Ubuntu is required."
+    [[ "${VERSION_ID:-}" == "$MACSTYLE_UBUNTU_VERSION" ]] ||
+        fail "Ubuntu $MACSTYLE_UBUNTU_VERSION is required."
 
-    [[ "${VERSION_ID:-}" == "$MACSTYLE_UBUNTU_VERSION" ]] \
-        || fail "Ubuntu $MACSTYLE_UBUNTU_VERSION is required."
+    command -v gnome-shell >/dev/null 2>&1 ||
+        fail "GNOME Shell is not installed."
 
-    command -v gnome-shell >/dev/null 2>&1 \
-        || fail "GNOME Shell is not installed."
+    local version
+    version="$(gnome-shell --version | awk '{print $3}')"
+    [[ "$version" == "$MACSTYLE_GNOME_VERSION"* ]] ||
+        fail "GNOME Shell $MACSTYLE_GNOME_VERSION required; found $version."
 
-    GNOME_VERSION="$(gnome-shell --version | awk '{print $3}')"
+    command -v dpkg >/dev/null 2>&1 || fail "dpkg is unavailable."
+    [[ -x "$BACKUP_HELPER" ]] || fail "Backup helper is missing or not executable."
+    [[ -x "$SCRIPT_DIR/modules/extensions.sh" ]] ||
+        fail "Extensions module is missing or not executable."
+    [[ -x "$SCRIPT_DIR/modules/dconf.sh" ]] ||
+        fail "DConf module is missing or not executable."
+    [[ -r "$SCRIPT_DIR/zsh-integration.zsh" ]] ||
+        fail "Zsh integration file is missing."
 
-    [[ "$GNOME_VERSION" == "$MACSTYLE_GNOME_VERSION"* ]] \
-        || fail "GNOME Shell $MACSTYLE_GNOME_VERSION is required. Found: $GNOME_VERSION"
-
-    command -v dpkg >/dev/null 2>&1 \
-        || fail "dpkg is unavailable."
-
-    SESSION_TYPE="${XDG_SESSION_TYPE:-unknown}"
-    ARCHITECTURE="$(dpkg --print-architecture)"
-
-    [[ ${#MACSTYLE_APT_PACKAGES[@]} -gt 0 ]] \
-        || fail "APT package configuration is empty."
-
-    echo "======================================"
-    echo "       MacStyle Ubuntu Installer"
-    echo "======================================"
-    echo
-    echo "Platform       : $PRETTY_NAME"
-    echo "GNOME Shell    : $GNOME_VERSION"
-    echo "Session        : $SESSION_TYPE"
-    echo "Architecture   : $ARCHITECTURE"
-    echo "Project        : $PROJECT_DIR"
-    echo "APT packages   : ${#MACSTYLE_APT_PACKAGES[@]}"
-    echo
-    echo "Environment validation: PASS"
-    echo "Configuration validation: PASS"
-    echo "No system or desktop changes were made."
+    echo "MacStyle Ubuntu environment: PASS"
+    echo "Ubuntu: $PRETTY_NAME"
+    echo "GNOME: $version"
+    echo "Session: ${XDG_SESSION_TYPE:-unknown}"
 }
 
-check_packages() {
-    command -v apt-cache >/dev/null 2>&1 \
-        || fail "apt-cache is unavailable."
-
-    command -v dpkg-query >/dev/null 2>&1 \
-        || fail "dpkg-query is unavailable."
+package_preflight() {
+    command -v apt-cache >/dev/null 2>&1 || fail "apt-cache is unavailable."
+    command -v dpkg-query >/dev/null 2>&1 || fail "dpkg-query is unavailable."
 
     local unavailable=0
+    local pkg installed candidate
 
     echo
-    echo "APT PACKAGE PREFLIGHT"
-    echo "---------------------"
+    echo "========== APT PACKAGE PREFLIGHT =========="
 
     for pkg in "${MACSTYLE_APT_PACKAGES[@]}"; do
-        [[ "$pkg" =~ ^[a-zA-Z0-9.+-]+$ ]] \
-            || fail "Invalid package name: $pkg"
-
-        local installed candidate
+        [[ "$pkg" =~ ^[a-zA-Z0-9.+-]+$ ]] || fail "Invalid package name: $pkg"
 
         installed="$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)"
         candidate="$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2; exit}')"
 
-        if [[ "$installed" == "installed" ]]; then
-            printf "INSTALLED   %-30s candidate: %s\\n" "$pkg" "${candidate:-unknown}"
+        if [[ "$installed" == installed ]]; then
+            printf 'INSTALLED   %s\n' "$pkg"
         elif [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
-            printf "AVAILABLE   %-30s candidate: %s\\n" "$pkg" "$candidate"
+            printf 'AVAILABLE   %s (%s)\n' "$pkg" "$candidate"
         else
-            printf "UNAVAILABLE %s\\n" "$pkg"
+            printf 'UNAVAILABLE %s\n' "$pkg"
             unavailable=1
         fi
     done
 
-    echo
-    if (( unavailable == 0 )); then
-        echo "APT preflight: PASS"
-    else
-        echo "APT preflight: FAILED — unavailable packages found."
-        return 1
-    fi
-
-    echo "No packages were installed or modified."
+    (( unavailable == 0 )) || fail "Unavailable APT packages found."
+    echo "APT preflight: PASS"
 }
-
 
 install_packages() {
     local missing=()
-    local unavailable=()
+    local pkg installed candidate
 
-    echo
-    echo "APT INSTALLATION PREFLIGHT"
-    echo "-------------------------"
+    package_preflight
 
     for pkg in "${MACSTYLE_APT_PACKAGES[@]}"; do
-        [[ "$pkg" =~ ^[a-zA-Z0-9.+-]+$ ]] \
-            || fail "Invalid package name: $pkg"
-
-        local installed candidate
         installed="$(dpkg-query -W -f='${db:Status-Status}' "$pkg" 2>/dev/null || true)"
         candidate="$(apt-cache policy "$pkg" | awk '/Candidate:/ {print $2; exit}')"
 
-        if [[ "$installed" == "installed" ]]; then
-            echo "Already installed: $pkg"
-        elif [[ -n "$candidate" && "$candidate" != "(none)" ]]; then
+        if [[ "$installed" != installed ]]; then
+            [[ -n "$candidate" && "$candidate" != "(none)" ]] ||
+                fail "No APT candidate for $pkg"
             missing+=("$pkg")
-            echo "Will install: $pkg ($candidate)"
-        else
-            unavailable+=("$pkg")
-            echo "Unavailable: $pkg"
         fi
     done
 
-    if ((${#unavailable[@]} > 0)); then
-        fail "Unavailable packages found. Nothing will be installed."
-    fi
-
     if ((${#missing[@]} == 0)); then
-        echo "All configured packages are already installed."
+        echo "All configured APT packages are already installed."
         return 0
     fi
 
     echo
-    echo "Packages to install: ${#missing[@]}"
-    printf '  - %s\n' "${missing[@]}"
+    echo "Packages to install:"
+    printf '  %s\n' "${missing[@]}"
     echo
-    read -r -p "Proceed with APT installation? [y/N] " answer
+    read -r -p "Install these packages? [y/N] " answer
 
     case "$answer" in
         y|Y|yes|YES) ;;
-        *)
-            echo "Installation cancelled. No packages were installed."
-            return 0
-            ;;
+        *) echo "Package installation cancelled."; return 3 ;;
     esac
 
     command -v sudo >/dev/null 2>&1 || fail "sudo is unavailable."
     sudo -v
-
     sudo apt-get install -y --no-install-recommends -- "${missing[@]}"
 
     local state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/macstyle-ubuntu"
@@ -208,15 +147,68 @@ install_packages() {
     touch "$state_dir/packages-requested.list"
 
     for pkg in "${missing[@]}"; do
-        if ! grep -Fqx -- "$pkg" "$state_dir/packages-requested.list"; then
+        grep -Fqx -- "$pkg" "$state_dir/packages-requested.list" ||
             printf '%s\n' "$pkg" >> "$state_dir/packages-requested.list"
-        fi
     done
 
+    echo "APT package installation complete."
+}
+
+install_zsh_integration() {
+    local rc="$HOME/.zshrc"
+    local start="# >>> MacStyle Ubuntu Zsh Integration >>>"
+    local end="# <<< MacStyle Ubuntu Zsh Integration <<<"
+
+    [[ ! -L "$rc" ]] || fail "$rc is a symlink; refusing to modify it."
+
+    if [[ -f "$rc" ]] && grep -Fq "$start" "$rc"; then
+        grep -Fq "$end" "$rc" ||
+            fail "Incomplete MacStyle Zsh block found in $rc."
+        echo "Zsh integration already present."
+        return
+    fi
+
+    if [[ -e "$rc" ]]; then
+        "$BACKUP_HELPER" backup .zshrc
+    else
+        "$BACKUP_HELPER" track .zshrc
+        : > "$rc"
+    fi
+
+    cat >> "$rc" <<EOF
+
+$start
+if [[ -r "$SCRIPT_DIR/zsh-integration.zsh" ]]; then
+  source "$SCRIPT_DIR/zsh-integration.zsh"
+fi
+$end
+EOF
+
+    echo "Zsh integration added to $rc."
+}
+
+install_desktop_components() {
     echo
-    echo "APT installation completed."
-    echo "Requested package list: $state_dir/packages-requested.list"
-    echo "Packages are intentionally not removed by the uninstaller."
+    echo "========== MODULE PREFLIGHT =========="
+    "$SCRIPT_DIR/modules/extensions.sh" --dry-run
+    "$SCRIPT_DIR/modules/dconf.sh" --dry-run
+
+    echo
+    echo "========== INSTALL EXTENSIONS =========="
+    "$SCRIPT_DIR/modules/extensions.sh"
+
+    echo
+    echo "========== APPLY EXTENSION SETTINGS =========="
+    "$SCRIPT_DIR/modules/dconf.sh" --apply
+
+    echo
+    echo "========== CONFIGURE ZSH =========="
+    install_zsh_integration
+
+    echo
+    echo "MacStyle Ubuntu installation steps completed."
+    echo "Log out and log back in if GNOME needs to reload extension files."
+    echo "No wallpaper, theme selection, dock state or extension enablement was changed."
 }
 
 case "$MODE" in
@@ -225,10 +217,15 @@ case "$MODE" in
         ;;
     packages-check)
         validate_environment
-        check_packages
+        package_preflight
         ;;
     install-packages)
         validate_environment
         install_packages
+        ;;
+    install)
+        validate_environment
+        install_packages || fail "Installation stopped because package installation was cancelled or failed."
+        install_desktop_components
         ;;
 esac

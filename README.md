@@ -1,5 +1,7 @@
 # macstyle
 
+> **Ubuntu users:** Ubuntu 26.04 / GNOME 50 has a separate integration path. The root `install.sh` and `uninstall.sh` remain Fedora-specific. See [Ubuntu installation guide](ubuntu/README.md).
+
 **A macOS-like desktop for Fedora GNOME, in one command.**
 
 Created by **Hilali Abdel**.
