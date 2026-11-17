@@ -1,6 +1,4 @@
-# macstyle
-
-> **Ubuntu users:** Ubuntu 26.04 / GNOME 50 has a separate integration path. The root `install.sh` and `uninstall.sh` remain Fedora-specific. See [Ubuntu installation guide](ubuntu/README.md).
+> **Ubuntu users:** MacStyle now includes a dedicated Ubuntu integration for Ubuntu 26.04 / GNOME 50. The original Fedora installation scripts remain unchanged. See the [Ubuntu installation guide](ubuntu/README.md) for installation, features, backup, recovery and uninstallation.
 
 **A macOS-like desktop for Fedora GNOME, in one command.**
 
@@ -27,6 +25,28 @@ cd fedora-gnome-macos-customization
 You need **Fedora 44 Workstation (GNOME 50)** or **Fedora 45 Workstation (GNOME 51)**. The script picks the right extensions for your version. Run the script from a terminal inside your GNOME desktop. If `git` is missing: `sudo dnf install git`.
 
 To undo everything, run `./uninstall.sh` (see [Uninstall](#uninstall)).
+
+## Ubuntu Integration
+
+MacStyle includes a separate Ubuntu integration developed and tested on Ubuntu 26.04.1 LTS with GNOME 50.1 (Wayland).
+
+The Ubuntu integration includes:
+
+- **GNOME Extensions:** Dash2Dock Motion, Blur My Shell, Compiz Alike Magic Lamp Effect and User Theme.
+- **Downloads Fan:** GNOME extension integration with a stable helper and Dock launcher.
+- **DConf Configuration:** Managed GNOME extension settings with rollback support.
+- **Backup & Recovery:** Original files and settings are preserved before managed changes.
+- **Safe Uninstallation:** Restores tracked original files and settings while preserving unrelated extensions and Dock favorites.
+
+Ubuntu installation:
+
+```bash
+./ubuntu/install.sh --check
+./ubuntu/install.sh --packages-check
+./ubuntu/install.sh --install
+```
+
+For complete instructions, see the [Ubuntu installation guide](ubuntu/README.md).
 
 ## What you get
 
