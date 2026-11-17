@@ -20,8 +20,9 @@ Options:
   --install            Install packages, extensions, DConf and Zsh integration
   --help               Show help
 
-The installer does not remove packages, change wallpaper,
-select themes, or enable/disable GNOME extensions.
+The installer does not remove packages, change wallpaper, or select themes.
+It enables Downloads Fan and adds its Dock launcher while preserving
+unrelated GNOME extensions and existing Dock favorites.
 EOF
 }
 
